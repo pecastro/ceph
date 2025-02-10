@@ -637,47 +637,18 @@ def create_self_signed_cert(organisation: str = 'Ceph',
     else:
         dname = {"O": organisation, "CN": common_name}
 
-    __create_self_signed_cert = """from OpenSSL import crypto
-from uuid import uuid4
-
-dname = {}
-
-# create a key pair
-pkey = crypto.PKey()
-pkey.generate_key(crypto.TYPE_RSA, 2048)
-
-# Create a "subject" object
-req = crypto.X509Req()
-subj = req.get_subject()
-
-# populate the subject with the dname settings
-for k, v in dname.items():
-    setattr(subj, k, v)
-
-# create a self-signed cert
-cert = crypto.X509()
-cert.set_subject(req.get_subject())
-cert.set_serial_number(int(uuid4()))
-cert.gmtime_adj_notBefore(0)
-cert.gmtime_adj_notAfter(10 * 365 * 24 * 60 * 60)  # 10 years
-cert.set_issuer(cert.get_subject())
-cert.set_pubkey(pkey)
-cert.sign(pkey, 'sha512')
-
-certificate = crypto.dump_certificate(crypto.FILETYPE_PEM, cert)
-private_key = crypto.dump_privatekey(crypto.FILETYPE_PEM, pkey)
-
-print("%s#######%s" % (certificate, private_key))""".format(dname)
-
+    import json
     import subprocess
-    result = subprocess.run(["/usr/bin/python3", "-c", __create_self_signed_cert], capture_output=True, text=True)
+
+    result = subprocess.run(["python3", "-m", "ceph.pybind.mgr.create_self_signed_cert",
+                             base64.b64encode(json.dumps(dname).encode("utf-8"))],
+                            capture_output=True, text=True)
 
     # Check result with a CompletedProcess
     if result.returncode != 0 or result.stderr != '':
         raise ValueError(result.stderr)
 
     cert, pkey = result.stdout.strip().split("#######")
-
     return eval(cert).decode('utf-8'), eval(pkey).decode('utf-8')
 
 
@@ -685,25 +656,13 @@ def verify_cacrt_content(crt):
     # type: (str) -> None
 
     try:
-        __verify_cacrt_content = """
-from OpenSSL import crypto
-import base64
-
-crt = base64.b64decode("{}").decode("ascii")
-
-crt_buffer = crt.encode("ascii") if isinstance(crt, str) else crt
-x509 = crypto.load_certificate(crypto.FILETYPE_PEM, crt_buffer)
-if x509.has_expired():
-    org, cn = get_cert_issuer_info(crt)
-    no_after = x509.get_notAfter()
-    end_date = None
-    if no_after is not None:
-        end_date = datetime.datetime.strptime(no_after.decode('ascii'), '%Y%m%d%H%M%SZ')
-        msg = 'Certificate issued by "%s/%s" expired on %s' % (org,cn,end_date)
-        print(msg)""".format(base64.b64encode(crt if isinstance(crt, bytes) else crt.encode('ascii')).decode("ascii"))
-
         import subprocess
-        result = subprocess.run(["/usr/bin/python3", "-c", __verify_cacrt_content], capture_output=True, text=True)
+        result = subprocess.run(["python3", "-m", "ceph.pybind.mgr.verify_cacrt_content",
+                                 base64.b64encode(crt if isinstance(crt, bytes) else crt.encode('ascii')).decode("ascii")],
+                                capture_output=True, text=True)
+        # The above script will only produce stdout output.
+        # The only scenarios that produce stderr output are failures to import modules
+        # or syntax errors which test_tls.py will catch
 
         # Check result of CompletedProcess
         if result.returncode != 0 or result.stdout != "":
@@ -734,26 +693,10 @@ def get_cert_issuer_info(crt: str) -> Tuple[Optional[str], Optional[str]]:
     """Basic validation of a ca cert"""
 
     try:
-        __get_cert_issuer_info = """
-from OpenSSL import crypto, SSL
-import base64
-
-crt = base64.b64decode("{}").decode("ascii")
-
-crt_buffer = crt.encode("ascii") if isinstance(crt, str) else crt
-(org_name, cn) = (None, None)
-cert = crypto.load_certificate(crypto.FILETYPE_PEM, crt_buffer)
-components = cert.get_issuer().get_components()
-for c in components:
-    if c[0].decode() == 'O':  # org comp
-        org_name = c[1].decode()
-    elif c[0].decode() == 'CN':  # common name comp
-        cn = c[1].decode()
-
-print("%s#######%s" % (org_name,cn))""".format(base64.b64encode(crt if isinstance(crt, bytes) else crt.encode('ascii')).decode("ascii"))
-
         import subprocess
-        result = subprocess.run(["/usr/bin/python3", "-c", __get_cert_issuer_info], capture_output=True, text=True)
+        result = subprocess.run(["python3", "-m", "ceph.pybind.mgr.get_cert_issuer_info",
+                                 base64.b64encode(crt if isinstance(crt, bytes) else crt.encode('ascii')).decode("ascii")],
+                                capture_output=True, text=True)
 
         # Check result with a CompletedProcess
         if result.returncode != 0 or result.stderr != '':
@@ -771,39 +714,11 @@ def verify_tls(crt, key):
     verify_cacrt_content(crt)
 
     try:
-        __verify_tls = """
-from OpenSSL import crypto, SSL
-import base64
-
-crt = base64.b64decode("{}").decode("ascii")
-key = base64.b64decode("{}").decode("ascii")
-
-try:
-    _key = crypto.load_privatekey(crypto.FILETYPE_PEM, key)
-    _key.check()
-except (ValueError, crypto.Error) as e:
-    print('Invalid private key: %s' % str(e))
-try:
-    crt_buffer = crt.encode("ascii") if isinstance(crt, str) else crt
-    _crt = crypto.load_certificate(crypto.FILETYPE_PEM, crt_buffer)
-except ValueError as e:
-    print('Invalid certificate key: %s' % str(e))
-
-try:
-    context = SSL.Context(SSL.TLSv1_METHOD)
-    context.use_certificate(_crt)
-    context.use_privatekey(_key)
-    context.check_privatekey()
-except crypto.Error as e:
-    print('Private key and certificate do not match up: %s' % str(e))
-except SSL.Error as e:
-    print(f'Invalid cert/key pair: %s' % e)""".format(
-            base64.b64encode(crt if isinstance(crt, bytes) else crt.encode('ascii')).decode("ascii"),
-            base64.b64encode(key if isinstance(key, bytes) else key.encode('ascii')).decode("ascii")
-        )
-
         import subprocess
-        result = subprocess.run(["/usr/bin/python3", "-c", __verify_tls], capture_output=True, text=True)
+        result = subprocess.run(["python3", "-m", "ceph.pybind.mgr.verify_tls",
+                                 base64.b64encode(crt if isinstance(crt, bytes) else crt.encode('ascii')).decode("ascii"),
+                                 base64.b64encode(key if isinstance(key, bytes) else key.encode('ascii')).decode("ascii")
+                                 ], capture_output=True, text=True)
 
         # Check result of CompletedProcess
         if result.returncode != 0 or result.stdout != "":
